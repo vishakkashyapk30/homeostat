@@ -22,3 +22,4 @@ config/transform_config_v1[0-9]*.json
 
 # MLflow local store
 mlruns/
+plan.md
