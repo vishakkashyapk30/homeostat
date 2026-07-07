@@ -27,7 +27,7 @@ The agent ships in two interchangeable forms:
 Either way, the *safety* lives in the tools (validate-before-promote, rollback),
 not in trusting the model — so an LLM mistake can never corrupt state.
 
----
+
 
 ## Table of contents
 
@@ -49,7 +49,7 @@ not in trusting the model — so an LLM mistake can never corrupt state.
 16. [Extending Homeostat](#extending-homeostat)
 17. [Design decisions & rationale](#design-decisions--rationale)
 
----
+
 
 ## Genesis — why this exists
 
@@ -75,7 +75,7 @@ pipeline: **sense → diagnose → act → verify → stabilize.**
 It is intentionally small enough to read end-to-end in an afternoon, but it models
 the real control loop that production reliability systems are built on.
 
----
+
 
 ## Why it matters
 
@@ -99,7 +99,7 @@ Delta Live Tables expectations, dbt tests). Homeostat sits one step beyond
   validated, logged, and explained in a postmortem — so an operator can always
   answer "what did the system do, and why?"
 
----
+
 
 ## Practical use cases
 
@@ -120,7 +120,7 @@ interfaces (`Sink`, `Tracker`), the exact same agent runs on local files, a Delt
 Lakehouse, or (with a new adapter) a cloud warehouse — see
 [Databricks / Lakehouse mode](#databricks--lakehouse-mode).
 
----
+
 
 ## Architecture in detail
 
@@ -198,7 +198,7 @@ storage and observability layers swappable:
 
 Covered in depth in the next section.
 
----
+
 
 ## The agentic AI
 
@@ -265,7 +265,7 @@ tier rate-limited mid-run, and the pipeline kept self-healing without a hiccup b
 switching to rules. That "LLM-driven, deterministically-backed" split is exactly
 what you'd want in a real production autonomous system.
 
----
+
 
 ## The AI/LLM used
 
@@ -302,7 +302,7 @@ See a full agentic run in
 [`examples/sample_incident_postmortem.md`](examples/sample_incident_postmortem.md),
 including Gemini's verbatim reasoning and tool calls.
 
----
+
 
 ## Failure modes and remediations
 
@@ -316,7 +316,7 @@ including Gemini's verbatim reasoning and tool calls.
 The first three demonstrate autonomous *repair*; the fourth demonstrates
 autonomous *containment* when repair isn't safe.
 
----
+
 
 ## Installation
 
@@ -342,7 +342,7 @@ pip install mlflow                   # --tracker mlflow  (experiment tracking)
 pip install pytest                   # run the test suite
 ```
 
----
+
 
 ## Command reference
 
@@ -422,8 +422,6 @@ ls logs/incidents/
 python -m pytest -q
 ```
 
----
-
 ## Configuration reference
 
 ### Transform config (`config/transform_config_v1.json`)
@@ -454,8 +452,6 @@ object the agent patches.
 
 Copy `.env.example` → `.env` and fill in a key. `.env` is git-ignored.
 
----
-
 ## Output artifacts
 
 Every run produces inspectable evidence:
@@ -473,8 +469,6 @@ Every run produces inspectable evidence:
 A committed worked example lives in
 [`examples/sample_incident_postmortem.md`](examples/sample_incident_postmortem.md)
 and [`examples/sample_run_manifest.jsonl`](examples/sample_run_manifest.jsonl).
-
----
 
 ## Databricks / Lakehouse mode
 
@@ -495,7 +489,6 @@ python -m src.cli run --cycles 10 --inject 4:schema_drift \
 - The data-quality checks intentionally use the vocabulary of **expectations**,
   matching Delta Live Tables and Great Expectations.
 
----
 
 ## MCP server (drive Homeostat from any MCP client)
 
@@ -547,7 +540,6 @@ Then ask the client, e.g.: *"Run the pipeline with a schema_drift on cycle 3,
 then investigate and heal it."* — it will call `run_pipeline`, `begin_incident`,
 `add_field_alias`, `validate_candidate`, and `promote_candidate` on its own.
 
----
 
 ## Testing
 
@@ -555,12 +547,9 @@ then investigate and heal it."* — it will call `run_pipeline`, `begin_incident
 pip install pytest
 python -m pytest -q
 ```
-
 The suite (`tests/`) covers the transform's expectation enforcement and dedup
 policies, alias-based schema absorption, deterministic failure injection, and
 every classifier decision path.
-
----
 
 ## Project layout
 
@@ -604,8 +593,6 @@ homeostat/
 └── .env.example                     # LLM key template (copy to .env)
 ```
 
----
-
 ## Extending Homeostat
 
 - **A new failure class:** add an injector in `failure_injector.py`, a detection
@@ -617,7 +604,6 @@ homeostat/
 - **A new LLM provider:** add a branch in `agent/llm.py`; the fix logic is
   unaffected because the LLM only writes narrative.
 
----
 
 ## Design decisions & rationale
 
