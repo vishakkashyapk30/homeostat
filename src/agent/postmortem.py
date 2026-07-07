@@ -72,6 +72,39 @@ def write_postmortem(incident: dict, sample: list[dict]) -> str:
 {incident.get("outcome_note", "")}
 """
 
+    trace_section = _fmt_trace(incident)
+    if trace_section:
+        content += trace_section
+
     with open(path, "w", encoding="utf-8") as f:
         f.write(content)
     return path
+
+
+def _fmt_trace(incident: dict) -> str:
+    trace = incident.get("agent_trace")
+    if not trace:
+        return ""
+    lines = [
+        "",
+        "## Agent Decision Trace",
+        f"_Mode: {incident.get('agent_mode', 'n/a')} · "
+        f"tool calls: {incident.get('tool_calls', 0)}_",
+        "",
+    ]
+    step = 0
+    for item in trace:
+        if item["type"] == "text":
+            if item.get("role") == "model" and item.get("text"):
+                lines.append(f"> {item['text']}")
+                lines.append("")
+        elif item["type"] == "tool_call":
+            step += 1
+            args = json.dumps(item.get("args", {}))
+            lines.append(f"{step}. **call** `{item['name']}({args})`")
+        elif item["type"] == "tool_result":
+            resp = json.dumps(item.get("response", {}))
+            snippet = resp if len(resp) <= 300 else resp[:297] + "..."
+            lines.append(f"   ↳ result: `{snippet}`")
+    lines.append("")
+    return "\n".join(lines)

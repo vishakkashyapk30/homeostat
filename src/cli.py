@@ -11,11 +11,28 @@ import os
 import sqlite3
 
 from . import config_store, paths
+from .agent import llm
+from .agent.agentic import LLMUnavailable, run_agent_llm
 from .agent.loop import run_agent
 from .env import load_dotenv
 from .failure_injector import FAILURE_TYPES, inject
 from .ingest import get_next_batch
 from .orchestrator import run_cycle
+
+
+def _resolve_agent_mode(mode: str) -> str:
+    if mode == "auto":
+        return "llm" if llm.select_provider() == "gemini" else "rules"
+    return mode
+
+
+def _run_agent(cycle_id: int, sink, tracker, mode: str) -> dict:
+    if mode == "llm":
+        try:
+            return run_agent_llm(cycle_id, sink, tracker)
+        except LLMUnavailable as exc:
+            print(f"     -> LLM agent unavailable ({exc}); falling back to rule-based agent")
+    return run_agent(cycle_id, sink, tracker)
 
 
 def _make_sink(name: str):
@@ -92,8 +109,12 @@ def _cmd_run(args: argparse.Namespace) -> int:
     inject_map = _parse_inject(args.inject)
     sink = _make_sink(args.backend)
     tracker = _make_tracker(args.tracker)
+    agent_mode = _resolve_agent_mode(args.agent)
 
-    print(f"Homeostat run: {args.cycles} cycles | backend={sink.name()} tracker={tracker.name()}")
+    print(
+        f"Homeostat run: {args.cycles} cycles | backend={sink.name()} "
+        f"tracker={tracker.name()} agent={agent_mode}"
+    )
     print("-" * 78)
 
     for cycle_id in range(1, args.cycles + 1):
@@ -110,11 +131,15 @@ def _cmd_run(args: argparse.Namespace) -> int:
 
         if entry["status"] == "degraded":
             print("     -> degraded detected; invoking self-healing agent...")
-            incident = run_agent(cycle_id, sink, tracker)
+            incident = _run_agent(cycle_id, sink, tracker, agent_mode)
+            tool_note = (
+                f" ({incident['tool_calls']} tool calls)" if incident.get("tool_calls") else ""
+            )
             print(
                 f"     -> classification={incident['classification']} "
                 f"resolution={incident['resolution']} "
                 f"config v{incident['config_version_before']}->v{incident['config_version_after']}"
+                f"{tool_note}"
             )
             print(f"     -> postmortem: {os.path.relpath(incident['postmortem_path'], paths.ROOT)}")
 
@@ -151,6 +176,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     run_p.add_argument("--backend", choices=["local", "delta"], default="local", help="Sink backend.")
     run_p.add_argument("--tracker", choices=["local", "mlflow"], default="local", help="Tracker backend.")
+    run_p.add_argument(
+        "--agent",
+        choices=["auto", "rules", "llm"],
+        default="auto",
+        help="Healing agent: 'llm' (Gemini tool-calling), 'rules' (deterministic), "
+        "or 'auto' (llm if a Gemini key is present, else rules).",
+    )
     run_p.add_argument("--fresh", action="store_true", help="Reset all state before running.")
     run_p.set_defaults(func=_cmd_run)
 
