@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "primary_key": "order_id",
+  "dedup_key": "order_id",
+  "required_fields": [
+    "order_id",
+    "user_id",
+    "item_sku",
+    "quantity",
+    "price",
+    "timestamp",
+    "region"
+  ],
+  "field_types": {
+    "order_id": "str",
+    "user_id": "str",
+    "item_sku": "str",
+    "quantity": "int",
+    "price": "float",
+    "timestamp": "str",
+    "region": "str"
+  },
+  "field_aliases": {},
+  "nullable_fields": [
+    "region"
+  ],
+  "dedup_policy": "quarantine",
+  "quarantine_threshold": 0.05
+}

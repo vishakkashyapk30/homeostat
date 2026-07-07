@@ -1,0 +1,19 @@
+# Homeostat runs its full demo on the Python standard library alone.
+# Nothing below is required for `python -m src.cli run ...` with the default
+# (local) backends. Each dependency unlocks an OPTIONAL adapter/feature:
+
+# --backend delta : write clean + dead-letter records to Delta Lake tables
+deltalake>=0.15.0
+pyarrow>=14.0.0
+
+# --tracker mlflow : log every cycle + incident as an MLflow run
+mlflow>=2.9.0
+
+# LLM-authored diagnosis narratives. Provider auto-selected from env keys
+# (Gemini via GEMINI_API_KEY, or OpenAI via OPENAI_API_KEY). Falls back to
+# deterministic templates when unset or unavailable.
+google-genai>=1.0.0
+openai>=1.0.0
+
+# test suite
+pytest>=7.0.0
