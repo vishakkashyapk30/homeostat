@@ -9,6 +9,10 @@ pyarrow>=14.0.0
 # --tracker mlflow : log every cycle + incident as an MLflow run
 mlflow>=2.9.0
 
+# MCP server : expose the pipeline + healing tools over the Model Context
+# Protocol (python -m src.mcp_server) for use from Claude Desktop, Cursor, etc.
+mcp>=1.2.0
+
 # LLM-authored diagnosis narratives. Provider auto-selected from env keys
 # (Gemini via GEMINI_API_KEY, or OpenAI via OPENAI_API_KEY). Falls back to
 # deterministic templates when unset or unavailable.

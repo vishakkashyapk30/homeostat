@@ -43,10 +43,11 @@ not in trusting the model — so an LLM mistake can never corrupt state.
 10. [Configuration reference](#configuration-reference)
 11. [Output artifacts](#output-artifacts)
 12. [Databricks / Lakehouse mode](#databricks--lakehouse-mode)
-13. [Testing](#testing)
-14. [Project layout](#project-layout)
-15. [Extending Homeostat](#extending-homeostat)
-16. [Design decisions & rationale](#design-decisions--rationale)
+13. [MCP server](#mcp-server-drive-homeostat-from-any-mcp-client)
+14. [Testing](#testing)
+15. [Project layout](#project-layout)
+16. [Extending Homeostat](#extending-homeostat)
+17. [Design decisions & rationale](#design-decisions--rationale)
 
 ---
 
@@ -496,6 +497,58 @@ python -m src.cli run --cycles 10 --inject 4:schema_drift \
 
 ---
 
+## MCP server (drive Homeostat from any MCP client)
+
+Homeostat ships an [MCP](https://modelcontextprotocol.io/) server that exposes
+the pipeline and the **same guardrailed healing tools** the in-process Gemini
+agent uses. This means any MCP client — Claude Desktop, Cursor, or your own —
+can *be* the healing agent: run the pipeline, inspect an incident, apply a fix,
+validate, and promote, all over the protocol.
+
+```bash
+pip install mcp
+python -m src.mcp_server        # stdio transport
+```
+
+### Tools exposed
+
+| Tool | Purpose |
+|---|---|
+| `run_pipeline(cycles, inject, auto_heal, fresh)` | Run cycles; optionally inject failures and/or auto-heal. |
+| `get_pipeline_status(limit)` | Recent manifest entries + which cycles are degraded. |
+| `begin_incident(cycle_id)` | Open a healing session; returns the incident report. |
+| `add_field_alias`, `set_field_nullable`, `set_dedup_policy` | Propose a fix on the candidate config. |
+| `validate_candidate()` | Re-run the transform on the failing batch with the candidate. |
+| `promote_candidate()` | Promote — **refuses unless a validation has passed.** |
+| `rollback()` | Revert to the last known-good config. |
+| `get_active_config`, `list_incidents`, `read_postmortem` | Inspect state and reports. |
+
+The guardrails live in the tools, so even an external client cannot promote an
+unvalidated fix.
+
+### Register it with a client
+
+**Cursor** (`.cursor/mcp.json`) or **Claude Desktop**
+(`claude_desktop_config.json`):
+
+```json
+{
+  "mcpServers": {
+    "homeostat": {
+      "command": "python",
+      "args": ["-m", "src.mcp_server"],
+      "cwd": "/absolute/path/to/homeostat"
+    }
+  }
+}
+```
+
+Then ask the client, e.g.: *"Run the pipeline with a schema_drift on cycle 3,
+then investigate and heal it."* — it will call `run_pipeline`, `begin_incident`,
+`add_field_alias`, `validate_candidate`, and `promote_candidate` on its own.
+
+---
+
 ## Testing
 
 ```bash
@@ -530,6 +583,7 @@ homeostat/
 │   ├── manifest.py                  # run-manifest read/append
 │   ├── env.py                       # dependency-free .env loader
 │   ├── cli.py                       # entrypoint
+│   ├── mcp_server.py                # MCP server (drive the pipeline from any MCP client)
 │   ├── adapters/
 │   │   ├── sink.py / sink_local.py / sink_delta.py
 │   │   └── tracker.py / tracker_local.py / tracker_mlflow.py
