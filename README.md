@@ -13,6 +13,20 @@ loop, and with a **rollback safety net** for the cases it cannot safely fix.
 
 In one sentence: *it is an on-call data engineer, encoded as software.*
 
+The agent ships in two interchangeable forms:
+
+- **LLM tool-calling agent** (default when a Gemini key is present) — **Google
+  Gemini** is the decision-maker. It reasons over the incident and autonomously
+  calls tools (investigate → patch → validate → promote / rollback → finish),
+  observing each result and re-planning until the pipeline is healthy. Its full
+  reasoning + tool-call trace is recorded in the postmortem.
+- **Rule-based agent** — a deterministic control loop that resolves the same
+  incidents with zero LLM calls. It is both a dependency-free default and the
+  automatic fallback whenever the LLM is unavailable or rate-limited.
+
+Either way, the *safety* lives in the tools (validate-before-promote, rollback),
+not in trusting the model — so an LLM mistake can never corrupt state.
+
 ---
 
 ## Table of contents
@@ -189,78 +203,103 @@ Covered in depth in the next section.
 
 Homeostat implements a genuine **closed-loop autonomous agent** — a
 sense–plan–act–verify cycle (an OODA loop, in military terms; a control loop, in
-cybernetics terms). What makes it *agentic* rather than a simple script:
+cybernetics terms). It ships in **two forms** that share the same tools and
+guardrails.
 
-1. **It perceives state.** The classifier reads the current run's metrics *and*
-   compares them against the last known-good run to understand what changed.
-2. **It reasons over that state.** The diagnoser maps the perceived failure to an
-   intent (`patch_config`, `rollback`) and a concrete, machine-applyable plan
-   (`config_diff`).
-3. **It acts on the world.** The patch executor writes a new config version and
-   the loop promotes it — actually changing how the next cycle behaves.
-4. **It verifies its own action.** The validator re-runs the transform on the
-   exact failing batch and only trusts the fix if health is restored.
-5. **It has a safety policy.** If verification fails, or the failure is
-   unrecognized, it rolls back — bounding the blast radius of its own mistakes.
-6. **It explains itself.** Every episode produces an auditable postmortem.
+### 1. LLM tool-calling agent (`--agent llm`, default when a key is present)
 
-The agent pipeline, step by step:
+Here **Gemini is the decision-maker.** It is given a set of tools and must decide
+which to call, observe each result, and re-plan until the pipeline is healthy.
+This is agentic in the modern sense: *the model reasons and calls tools*, rather
+than a script calling the model.
+
+The tools exposed to the model (`src/agent/agentic.py`):
+
+| Tool | What it does |
+|---|---|
+| `get_incident_report()` | Returns metrics, reason codes, schema comparison, active config, and a sample of quarantined records. |
+| `add_field_alias(source, target)` | Maps a drifted field name back to the canonical one (schema-drift fix). |
+| `set_field_nullable(field)` | Relaxes the null policy for a field (null-spike fix). |
+| `set_dedup_policy(policy)` | Switches duplicate handling to `drop` (duplicate-key fix). |
+| `validate_candidate()` | Re-runs the transform with the candidate config on the failing batch. |
+| `promote_candidate()` | Promotes the fix and re-runs the cycle — **refuses unless a validation has passed.** |
+| `rollback()` | Reverts to the last known-good config. |
+| `finish(classification, resolution, root_cause, summary)` | Concludes the incident. |
+
+A real decision trace produced by Gemini (recorded verbatim in the postmortem):
+
+```
+1. call get_incident_report()
+   ↳ reason_counts: {"duplicate_key": 45}, quarantine_rate: 0.13
+ > "The primary reason for quarantine is 'duplicate_key' (45 records)...
+    I will set the deduplication policy to 'drop'."
+2. call set_dedup_policy("drop")
+3. call validate_candidate()   ↳ passed: true, quarantine_rate_after: 0.0
+ > "The validation passed. I will now promote this candidate configuration."
+4. call promote_candidate()    ↳ ok: true, active_version: 2
+```
+
+**The safety is in the tools, not the model.** `promote_candidate()` mechanically
+refuses to promote a fix that hasn't passed `validate_candidate()`, and if the
+agent ends without promoting or rolling back, the loop forces a rollback. So the
+model plans freely, but it cannot corrupt state or ship an unproven fix.
+
+### 2. Rule-based agent (`--agent rules`, and the automatic fallback)
+
+A deterministic version of the exact same loop, with **no LLM calls**:
 
 | Step | Module | What it does |
 |---|---|---|
-| **Classify** | `agent/classifier.py` | Deterministic first pass. Returns `schema_drift`, `null_spike`, `duplicate_keys`, `unknown`, or `healthy` from the manifest metrics. Uses schema-hash change and *dominant reason code* (≥50% of quarantined records) as signals. |
-| **Diagnose** | `agent/diagnoser.py` | Turns the label into a structured proposal: `diagnosis_summary`, `root_cause`, `proposed_action`, and a `config_diff`. For schema drift it *infers the alias* from the quarantined records (which extra field replaced which missing required field). |
-| **Patch** | `agent/patch_executor.py` | Applies the diff to a **new** `transform_config_vN+1.json`. Never mutates the live config. |
-| **Validate** | `agent/validator.py` | Re-runs `transform_batch` with the candidate config against the *same* batch that failed. Passes only if `quarantine_rate` returns under threshold and the schema normalizes back to healthy. |
-| **Promote / Rollback** | `agent/rollback.py` + loop | On pass: flip `active_version.txt` to the new version and re-run the cycle (now healed). On fail/unknown: revert to the last known-good version. |
-| **Explain** | `agent/postmortem.py` | Renders `logs/incidents/incident_<cycle>_<ts>.md` with evidence (before/after metrics, a sample quarantined record), the action taken (the diff), and the outcome. |
-| **Orchestrate** | `agent/loop.py` | Wires all of the above into a single `run_agent(cycle_id, ...)` invoked whenever a cycle is `degraded`. |
+| **Classify** | `agent/classifier.py` | Returns `schema_drift`, `null_spike`, `duplicate_keys`, `unknown`, or `healthy` from the metrics (schema-hash change + dominant reason code ≥ 50%). |
+| **Diagnose** | `agent/diagnoser.py` | Produces a `config_diff`; infers the alias for schema drift from the quarantined records. |
+| **Patch / Validate / Promote / Rollback** | `patch_executor`, `validator`, `rollback` | Identical guardrails to the LLM tools. |
+| **Explain** | `agent/postmortem.py` | Writes the incident postmortem. |
+| **Orchestrate** | `agent/loop.py` | `run_agent(cycle_id, ...)`, invoked whenever a cycle is `degraded`. |
 
-### Why rule-based reasoning at the core (and not "just ask an LLM")
+### Why keep a deterministic path at all?
 
-The failure *classification* and the *fix* are computed **deterministically**.
-This is a deliberate engineering choice, not a limitation:
-
-- **Reliability** — a known failure mode is resolved the same way every time.
-- **Speed & cost** — no network round-trip in the hot path.
-- **Testability** — the decision logic is unit-tested (`tests/test_classifier.py`).
-- **Safety** — an LLM hallucination can never corrupt a config or promote a bad fix.
-
-The LLM is reserved for what LLMs are genuinely good at: writing a clear,
-human-readable explanation. This "deterministic control, LLM narration" split is
-the same pattern you'd want in any production autonomous system.
+Because it makes the system **reliable, testable, and free** for known failures,
+and it is the **automatic safety fallback**: during development the Gemini free
+tier rate-limited mid-run, and the pipeline kept self-healing without a hiccup by
+switching to rules. That "LLM-driven, deterministically-backed" split is exactly
+what you'd want in a real production autonomous system.
 
 ---
 
 ## The AI/LLM used
 
 Homeostat uses **Google Gemini** (default model **`gemini-2.5-flash`**) via the
-modern [`google-genai`](https://pypi.org/project/google-genai/) SDK to author the
-**root-cause and diagnosis prose** in each postmortem.
+modern [`google-genai`](https://pypi.org/project/google-genai/) SDK, with native
+**function/tool calling**.
 
-**What the LLM does:** given the classification, the proposed config diff, the
-metrics, and a sample of quarantined records, it returns a crisp root cause and a
-1–2 sentence diagnosis summary (strict JSON).
+**In `--agent llm` mode, Gemini drives the whole remediation:** it calls
+`get_incident_report`, reasons about the failure, calls the appropriate fix tool,
+validates, and promotes or rolls back — a real multi-step tool-use loop, not a
+single prompt. Its reasoning and every tool call/result are captured in the
+postmortem's **Agent Decision Trace**.
 
-**What the LLM does *not* do:** it never chooses or alters the fix. The
-`config_diff` is always computed deterministically, so the system heals correctly
-**even with no API key** (postmortems then read `Narrative Source: deterministic`).
+**Guardrails, not blind trust:** the tools enforce safety (no promotion without a
+passing validation; forced rollback if the agent stops without resolving), so an
+LLM error cannot corrupt data or ship a bad fix.
 
-**Provider-agnostic by design.** The provider is auto-selected:
+**Provider-agnostic & always-degradable.** Provider auto-selected:
 
-- `GEMINI_API_KEY` (or `GOOGLE_API_KEY`) set → **Gemini**
-- otherwise `OPENAI_API_KEY` set → **OpenAI**
-- neither → deterministic templates
+- `GEMINI_API_KEY` (or `GOOGLE_API_KEY`) set → **Gemini** (tool-calling agent)
+- neither key, or LLM unavailable/rate-limited → **rule-based agent** (identical outcome, no LLM)
 
-Override with `HOMEOSTAT_LLM_PROVIDER=gemini|openai` and choose a model with
-`HOMEOSTAT_LLM_MODEL`. Keys are read from a git-ignored `.env` (see
+Override with `HOMEOSTAT_LLM_MODEL` (e.g. `gemini-2.5-flash`,
+`gemini-2.5-flash-lite`). Keys live in a git-ignored `.env` (see
 [`.env.example`](.env.example)); **no key is ever committed**.
 
-Example of a Gemini-authored postmortem line (from a real run):
+> **Rate limits:** the Gemini free tier is limited (e.g. ~20 requests/day for
+> `gemini-2.5-flash`), and one tool-calling incident uses several requests. A
+> single-incident demo showcases the LLM agent well; longer multi-incident runs
+> will gracefully fall back to the rule-based agent when the quota is hit. Use a
+> paid tier (or `--agent rules`) for fully deterministic multi-incident runs.
 
-> *"All 300 records are quarantined due to a missing `item_sku` field, which has a
-> 100% null rate, indicating a schema drift where the incoming data uses
-> `sku_code` instead."*
+See a full agentic run in
+[`examples/sample_incident_postmortem.md`](examples/sample_incident_postmortem.md),
+including Gemini's verbatim reasoning and tool calls.
 
 ---
 
@@ -322,6 +361,7 @@ python -m src.cli run [options]
 | `--inject CYCLE:TYPE` | — | Inject a failure into a specific cycle. **Repeatable.** `TYPE` ∈ `schema_drift`, `null_spike`, `duplicate_keys`, `type_drift`. |
 | `--backend {local,delta}` | `local` | Storage sink. `delta` requires `deltalake` + `pyarrow`. |
 | `--tracker {local,mlflow}` | `local` | Observability tracker. `mlflow` requires `mlflow`. |
+| `--agent {auto,rules,llm}` | `auto` | Healing agent. `llm` = Gemini tool-calling; `rules` = deterministic; `auto` = llm if a Gemini key is present, else rules. |
 | `--fresh` | off | Reset all state (manifest, incidents, generated configs, data) before running. |
 
 ### `show` — summarize the clean store
@@ -344,6 +384,13 @@ python -m src.cli run --cycles 10 \
 
 # 2. Show ONLY the rollback safety net (an unfixable failure).
 python -m src.cli run --cycles 5 --inject 3:type_drift --fresh
+
+# 2b. Force the Gemini tool-calling agent for a single incident (see the trace).
+python -m src.cli run --cycles 4 --inject 3:schema_drift --agent llm --fresh
+
+# 2c. Force the deterministic rule-based agent (no LLM, fully reproducible).
+python -m src.cli run --cycles 10 --inject 4:schema_drift --inject 7:null_spike \
+    --inject 9:duplicate_keys --agent rules --fresh
 
 # 3. A single failure type, larger batches.
 python -m src.cli run --cycles 8 --size 1000 --inject 4:null_spike --fresh
@@ -487,14 +534,15 @@ homeostat/
 │   │   ├── sink.py / sink_local.py / sink_delta.py
 │   │   └── tracker.py / tracker_local.py / tracker_mlflow.py
 │   └── agent/
+│       ├── agentic.py               # Gemini tool-calling agent (LLM is decision-maker)
 │       ├── classifier.py            # rule-based failure classification
 │       ├── diagnoser.py             # structured fix proposal (+ optional LLM prose)
-│       ├── llm.py                   # Gemini / OpenAI provider (narrative only)
+│       ├── llm.py                   # Gemini / OpenAI provider (narrative)
 │       ├── patch_executor.py        # writes new config version
 │       ├── validator.py             # validate-before-promote
 │       ├── rollback.py              # safety net
-│       ├── postmortem.py            # markdown incident reports
-│       └── loop.py                  # wires the agent pipeline
+│       ├── postmortem.py            # markdown incident reports (incl. decision trace)
+│       └── loop.py                  # wires the rule-based agent pipeline
 ├── tests/                           # unit tests
 ├── examples/                        # a committed sample manifest + postmortem
 ├── plan.md                          # the original design/build plan
@@ -521,7 +569,8 @@ homeostat/
 
 | Decision | Why |
 |---|---|
-| **Rule-based classification before any LLM** | Deterministic, fast, free, and testable for known failures; the LLM can't corrupt the control path. |
+| **Two agents sharing one set of guardrailed tools** | The LLM agent plans; the rule-based agent is a deterministic, testable, always-available fallback. Same safety, same outcomes. |
+| **Safety lives in the tools, not the model** | `promote` refuses an unvalidated fix; the loop forces a rollback if unresolved — so an LLM mistake cannot corrupt state or ship a bad fix. |
 | **Versioned configs, never mutated in place** | Full audit trail and cheap, instant rollback. |
 | **Validate before promote** | An automated fix is proven on the exact failing batch before going live — mirrors canary/shadow deployment. |
 | **Rollback safety net** | Bounds the blast radius of an incorrect automated fix — the single most important property of any self-healing system. |
